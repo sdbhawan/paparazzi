@@ -30,6 +30,7 @@
     <file name="navigation.c" dir="$(SRC_FIRMWARE)"/>
     <file name="common_flight_plan.c"/>
     <file name="waypoints.c"/>
+    <file name="waypoints_list.c"/>
     <define name="USE_NAVIGATION"/>
     <test firmware="rotorcraft">
       <configure name="SRC_FIRMWARE" value="firmwares/rotorcraft"/>

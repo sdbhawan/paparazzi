@@ -29,6 +29,8 @@
 #define NAV_C
 
 #include "firmwares/rotorcraft/navigation.h"
+#include "modules/nav/waypoints_list.h"
+
 
 #include "pprz_debug.h"
 #include "state.h"
@@ -70,6 +72,7 @@ static inline void nav_set_altitude(void);
 void nav_init(void)
 {
   waypoints_init();
+  waypoints_list_init();
   common_flight_plan_init();
 
   nav.horizontal_mode = NAV_HORIZONTAL_MODE_WAYPOINT;
