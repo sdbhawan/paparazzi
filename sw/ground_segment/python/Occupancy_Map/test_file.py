@@ -24,8 +24,6 @@ sys.path.append(PPRZ_HOME + "/sw/ext/pprzlink/lib/v1.0/python")
 
 from pprzlink.ivy import IvyMessagesInterface
 
-# --- ENU reference origin (from your flight plan) ---
-
 
 # --- ENU origin (from flight plan) ---
 lat0, lon0, alt0 = 52.1681551, 4.4126468, 0.0
@@ -146,31 +144,6 @@ while True:
         fig.canvas.draw()
         fig.canvas.flush_events()
     time.sleep(0.1)
-
-# --- Setup map (simplified example, add your waypoints/polygons/victims here) ---
-# fig, ax = plt.subplots(figsize=(10, 8))
-# ax.set_title("UAV Mission Area (ENU)")
-# ax.set_aspect("equal", adjustable="datalim")
-# ax.set_xlim(-500, 500)
-# ax.set_ylim(-500, 500)
-
-# # UAV dot
-# uav_dot, = ax.plot([], [], "ro", markersize=10, label="UAV")
-# ax.legend()
-
-# plt.ion()
-# plt.show()
-
-# # --- Live update loop ---
-# while True:
-#     if uav_state["x"] is not None:
-#         uav_dot.set_data(uav_state["x"], uav_state["y"])
-#         fig.canvas.draw()
-#         fig.canvas.flush_events()
-#     time.sleep(0.1)
-
-##################################################################################################################
-
 
 
 # --- Load XML ---
