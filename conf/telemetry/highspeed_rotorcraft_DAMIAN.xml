@@ -68,8 +68,8 @@
       <message name="IMU_HEATER"               period="15.1"/>
       <message name="WP_MOVED_ENU"             period="1.0"/>
       <message name="WP_LIST_ENU"              period="1.0"/>
-      
-    </mode>
+      <message name="MOVE_WP"                  period="1.0"/>
+    </mode> 
 
     <mode name="sim" key_press="d">
       <message name="AUTOPILOT_VERSION"        period="11.1"/>
@@ -392,6 +392,7 @@
       <message name="AIRSPEED_RAW"             period="0.02"/>
       <message name="WP_MOVED_ENU"             period="1.0"/>
       <message name="WP_LIST_ENU"              period="1.0"/>
+      <message name="MOVE_WP"                  period="1.0"/>
     </mode>
   </process>
 

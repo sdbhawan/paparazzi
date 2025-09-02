@@ -122,11 +122,11 @@ def on_gps_int(ac_id, msg):
 interface.subscribe(on_gps_int)
 
 # start Ivy in background thread so the main thread can run plotting loop
-def run_ivy_loop():
-    try:
-        interface.loop()
-    except Exception as e:
-        print("Ivy loop ended:", e)
+# def run_ivy_loop():
+#     try:
+#         interface.loop()
+#     except Exception as e:
+#         print("Ivy loop ended:", e)
 
 t = threading.Thread(target=run_ivy_loop, daemon=True)
 t.start()
