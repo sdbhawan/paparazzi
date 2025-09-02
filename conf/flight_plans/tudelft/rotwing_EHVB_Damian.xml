@@ -13,6 +13,7 @@
     <waypoint name="TD" x="10" y="-1"/>
     <waypoint name="APP" x="70" y="-25"/>
     <waypoint name="FOLLOW" x="300" y="80"/>
+    <waypoint name="Ghost" x="10" y="10"/>
     <!-- EHVB -->
     <waypoint lat="52.169189" lon="4.410820" name="C1"/>
     <waypoint lat="52.168049" lon="4.406923" name="C2"/>
@@ -135,6 +136,9 @@
     </block>
     <block name="Standby" strip_button="Standby" strip_icon="home.png" pre_call="rotwing_state_choose_state_by_dist(WP_STDBY)">
         <stay wp="STDBY"/>
+    </block>
+    <block name="Ghost" strip_button="Ghost" strip_icon="home.png" pre_call="rotwing_state_choose_state_by_dist(WP_STDBY)">
+        <stay wp="Ghost"/>
     </block>
     <block name="Standby_dist" strip_button="Standby Dist" strip_icon="home.png" pre_call="rotwing_state_choose_state_by_dist(WP_STDBY)">
         <stay wp="STDBY"/>
