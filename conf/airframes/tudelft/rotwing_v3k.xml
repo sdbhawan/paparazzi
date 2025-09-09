@@ -436,6 +436,7 @@
         <define name="TAKEOFF_BAT_LEVEL"        value="24.2" unit="V"/>
         <define name="BAT_NB_CELLS"             value="6"/>
     </section>
-
+    
+    
     <include href="conf/airframes/tudelft/rotwing_7kg_common.xml" />
 </airframe>

@@ -137,6 +137,21 @@
     <block name="Standby" strip_button="Standby" strip_icon="home.png" pre_call="rotwing_state_choose_state_by_dist(WP_STDBY)">
         <stay wp="STDBY"/>
     </block>
+    <block name="guided" on_enter="autopilot_static_set_mode(AP_MODE_GUIDED)" on_exit="autopilot_static_set_mode(AP_MODE_NAV)">
+        <call_once fun="rotwing_state_set(ROTWING_STATE_FREE)"/>
+        <while cond='1'/>
+        <!-- <exception cond ="timeout" deroute="standby"> -->
+    </block>
+    
+
+    <!-- <block name="GUIDED_START" key="g">
+	     <call_once fun="setGuided()"/>
+	     <stay wp="STDBY"/>
+    </block> -->
+
+
+
+
     <block name="Ghost" strip_button="Ghost" strip_icon="home.png" pre_call="rotwing_state_choose_state_by_dist(WP_STDBY)">
         <stay wp="Ghost"/>
     </block>
