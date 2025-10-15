@@ -8,6 +8,9 @@ from shapely.geometry import Polygon, Point
 from scipy.special import expit  # stable sigmoid
 import pymap3d as pm
 import math
+from scipy.spatial import cKDTree
+from scipy.ndimage import gaussian_filter
+
 
 # --- SETTINGS ---
 USE_PPRZ = False
@@ -73,7 +76,8 @@ belief = 0.5*np.ones(len(grid_points))
 # -----------------------------
 # VICTIMS
 # -----------------------------
-victims = np.array([[50,50],[150,150]])
+
+victims = np.array([[50,-200],[150,-350]], dtype=float)
 for v in victims:
     d2 = np.sum((grid_points - v)**2, axis=1)
     belief[d2 < 20**2] = 0.9  # high occupancy around victims
@@ -100,40 +104,51 @@ def visible_cells_at(pos_xy, altitude, grid_points, fov_radius):
     d2 = dx**2+dy**2
     return d2 <= fov_radius**2
 
-# -----------------------------
-# SEMI-PREDICTIVE INFO GAIN
-# -----------------------------
-def expected_info_gain_semi_predictive(path, belief, grid_points, fov_radius, pred_depth=3):
+
+def expected_info_gain(path, belief, grid_points, fov_radius, pred_depth=3):
     """
     Semi-predictive expected information gain along path.
+    Computes true entropy reduction ΔH = H_before - H_after,
+    only within the UAV's FOV at each step.
     """
-    ent = cell_entropy_map(belief)
-    vis_mask_total = np.zeros(len(grid_points), dtype=bool)
     pred_belief = belief.copy()
     total_IG = 0.0
+    vis_mask_total = np.zeros(len(grid_points), dtype=bool)
 
-    for i in range(len(path)-1):
+    for i in range(len(path) - 1):
         if i >= pred_depth:
             break
-        p0, p1 = np.array(path[i]), np.array(path[i+1])
-        seg_len = np.linalg.norm(p1[:2]-p0[:2])
+
+        p0, p1 = np.array(path[i]), np.array(path[i + 1])
+        seg_len = np.linalg.norm(p1[:2] - p0[:2])
         n_samples = max(2, int(np.ceil(seg_len / 20.0)))
+
         xs = np.linspace(p0[0], p1[0], n_samples)
         ys = np.linspace(p0[1], p1[1], n_samples)
         zs = np.linspace(p0[2], p1[2], n_samples)
 
         for x, y, z in zip(xs, ys, zs):
             vis_mask = visible_cells_at(np.array([x, y]), z, grid_points, fov_radius)
-            new_IG = np.sum(ent[vis_mask])
-            total_IG += new_IG
 
-            # simulate belief update (simple nudge)
-            pred_belief[vis_mask] = pred_belief[vis_mask]*0.7 + 0.3*0.5
+            # --- Entropy before and after (only within FOV) ---
+            H_before = cell_entropy_map(pred_belief[vis_mask])
+
+            # Simulate an observation update toward 0.5 baseline
+            new_belief = pred_belief.copy()
+            new_belief[vis_mask] = new_belief[vis_mask] * 0.7 + 0.3 * 0.5
+
+            H_after = cell_entropy_map(new_belief[vis_mask])
+
+            # --- True information gain in this FOV ---
+            IG_step = np.sum(H_before - H_after)
+            total_IG += IG_step
+
+            # --- Update predictive belief for next step ---
+            pred_belief = new_belief
             vis_mask_total |= vis_mask
 
-        ent = cell_entropy_map(pred_belief)
-
     return total_IG, vis_mask_total
+
 
 # -----------------------------
 # ENERGY (simple proxy)
@@ -184,7 +199,7 @@ def plan_velocity_ipp(drone_pos, belief, grid_points, soft_poly, fov_radius,
     # evaluate semi-predictive objective
     best_J, best_path, best_mask = -np.inf, None, None
     for path in candidates:
-        I_p, vis_mask = expected_info_gain_semi_predictive(path, belief, grid_points, fov_radius, pred_depth)
+        I_p, vis_mask = expected_info_gain(path, belief, grid_points, fov_radius, pred_depth)
         E_p = energy_of_path(path)
         J = I_p/I_scale - alpha_d*E_p/E_scale
         if J > best_J:
@@ -266,27 +281,127 @@ plt.show()
 # SIMULATION LOOP
 # -----------------------------
 max_dheading = np.deg2rad(10)  # max heading change per second
-buffer =  FOV_radius
+buffer =  FOV_radius 
 
-# Create a buffered polygon for safe navigation
+# Create a buffered polygon for safe navigation: ensures that if we detect that there are way less visible cells, 
+# the UAV will turn such that it can sense more cells again
+
 if buffer > 0:
     safe_poly = soft_poly.buffer(-buffer)
 else:
     safe_poly = soft_poly
 
-for t in range(500):
+
+#for loop single UAV without drift:
+
+# for t in range(300):
+#     # -----------------------------
+#     # 1. Update observed cells
+#     # -----------------------------
+#     vis_mask_full = visible_cells_at(drone_pos[:2], drone_pos[2], grid_points_all, FOV_radius)
+#     vis_mask = vis_mask_full[inside_idx]
+#     victim_signal = victim_signal_full[inside_idx]
+
+#     belief[vis_mask] += 0.3 * (victim_signal[vis_mask] - belief[vis_mask])
+#     belief = np.clip(belief, 0, 1)
+
+#     # -----------------------------
+#     # 2. Plan next velocity
+#     # -----------------------------
+#     vx_des, vy_des, vz_des, best_path, best_mask, Jval = plan_velocity_ipp(
+#         drone_pos, belief, grid_points, soft_poly, FOV_radius,
+#         v_max=v_max, n_directions=16, step_length=40.0,
+#         I_scale=I_scale, E_scale=E_scale, alpha_d=alpha_d,
+#         buffer=buffer
+#     )
+
+#     # -----------------------------
+#     # 3. Boundary correction
+#     # -----------------------------
+#     next_pos = drone_pos + np.array([vx_des, vy_des, vz_des]) * dt_step
+#     point_next = Point(next_pos[0], next_pos[1])
+#     if not safe_poly.contains(point_next):
+#         # Project movement along the closest point on the safe polygon
+#         nearest = np.array(safe_poly.exterior.interpolate(safe_poly.exterior.project(point_next)).coords[0])
+#         direction = nearest - drone_pos[:2]
+#         norm = np.linalg.norm(direction)
+#         if norm > 1e-3:
+#             vx_des, vy_des = direction / norm * min(norm/dt_step, v_max)
+#         else:
+#             vx_des, vy_des = 0.0, 0.0
+
+#     # -----------------------------
+#     # 4. Smooth UAV heading
+#     # -----------------------------
+#     speed = np.linalg.norm([vx_des, vy_des])
+#     if speed < 1e-3:
+#         vx_smooth, vy_smooth = 0.0, 0.0
+#     else:
+#         current_heading = np.arctan2(drone_vel[1], drone_vel[0])
+#         desired_heading = np.arctan2(vy_des, vx_des)
+#         delta_heading = (desired_heading - current_heading + np.pi) % (2*np.pi) - np.pi
+#         delta_heading = np.clip(delta_heading, -max_dheading*dt_step, max_dheading*dt_step)
+#         new_heading = current_heading + delta_heading
+#         vx_smooth = speed * np.cos(new_heading)
+#         vy_smooth = speed * np.sin(new_heading)
+
+#     drone_vel[:2] = [vx_smooth, vy_smooth]
+#     drone_vel[2] = vz_des
+#     drone_pos += drone_vel * dt_step
+
+#     # -----------------------------
+#     # 5. Update visualization
+#     # -----------------------------
+#     raster_belief[inside_idx] = belief
+#     sc.set_array(raster_belief)
+#     drone_plot.set_data(drone_pos[0], drone_pos[1])
+#     plt.pause(0.01)
+
+#     # -----------------------------
+#     # 6. Print status
+#     # -----------------------------
+#     mean_H = np.mean(cell_entropy_map(belief))
+#     heading_deg = math.degrees(math.atan2(vy_smooth, vx_smooth))
+#     print(f"t={t:03d}s pos=({drone_pos[0]:.1f},{drone_pos[1]:.1f},{drone_pos[2]:.1f}) "
+#           f"vx={vx_smooth:.2f} vy={vy_smooth:.2f} vz={vz_des:.2f} heading={heading_deg:.2f} "
+#           f"vis_cells={np.sum(vis_mask)} mean_H={mean_H:.3f} J={Jval:.3f}")
+
+
+# plt.ioff()
+# plt.show()
+
+# -----------------------------
+# SIMULATION LOOP WITH MOVING VICTIMS
+# -----------------------------
+v_drift = np.array([0.5, 0.2])  # drift velocity of victims [m/s] in XY
+
+
+for t in range(300):
     # -----------------------------
-    # 1. Update observed cells
+    # 1. Update victim positions (drift)
+    # -----------------------------
+    v_drift = np.array([0.5, 0.2])  # simple linear drift per second
+    victims[:, :2] += v_drift * dt_step
+
+    # -----------------------------
+    # 2. Update observed cells
     # -----------------------------
     vis_mask_full = visible_cells_at(drone_pos[:2], drone_pos[2], grid_points_all, FOV_radius)
     vis_mask = vis_mask_full[inside_idx]
+
+    # recompute victim signal
+    victim_signal_full = np.zeros(len(grid_points_all))
+    for v in victims:
+        d2 = np.sum((grid_points_all - v[:2])**2, axis=1)
+        victim_signal_full[d2 <= FOV_radius**2] = 1.0
     victim_signal = victim_signal_full[inside_idx]
 
+    # belief update
     belief[vis_mask] += 0.3 * (victim_signal[vis_mask] - belief[vis_mask])
     belief = np.clip(belief, 0, 1)
 
     # -----------------------------
-    # 2. Plan next velocity
+    # 3. Plan next velocity
     # -----------------------------
     vx_des, vy_des, vz_des, best_path, best_mask, Jval = plan_velocity_ipp(
         drone_pos, belief, grid_points, soft_poly, FOV_radius,
@@ -295,20 +410,9 @@ for t in range(500):
         buffer=buffer
     )
 
-    # -----------------------------
-    # 3. Boundary correction
-    # -----------------------------
-    next_pos = drone_pos + np.array([vx_des, vy_des, vz_des]) * dt_step
-    point_next = Point(next_pos[0], next_pos[1])
-    if not safe_poly.contains(point_next):
-        # Project movement along the closest point on the safe polygon
-        nearest = np.array(safe_poly.exterior.interpolate(safe_poly.exterior.project(point_next)).coords[0])
-        direction = nearest - drone_pos[:2]
-        norm = np.linalg.norm(direction)
-        if norm > 1e-3:
-            vx_des, vy_des = direction / norm * min(norm/dt_step, v_max)
-        else:
-            vx_des, vy_des = 0.0, 0.0
+    # fallback if no path found
+    if best_path is None:
+        vx_des, vy_des, vz_des = 0.5, 0.0, 0.0  # small default motion
 
     # -----------------------------
     # 4. Smooth UAV heading
@@ -327,21 +431,46 @@ for t in range(500):
 
     drone_vel[:2] = [vx_smooth, vy_smooth]
     drone_vel[2] = vz_des
+
+    # -----------------------------
+    # 5. Boundary correction
+    # -----------------------------
+    next_pos = drone_pos + drone_vel * dt_step
+    point_next = Point(next_pos[0], next_pos[1])
+    if not safe_poly.contains(point_next):
+        # project onto closest point on safe polygon
+        nearest = np.array(safe_poly.exterior.interpolate(safe_poly.exterior.project(point_next)).coords[0])
+        direction = nearest - drone_pos[:2]
+        norm = np.linalg.norm(direction)
+        if norm > 1e-3:
+            vx_smooth, vy_smooth = direction / norm * min(norm/dt_step, v_max)
+        else:
+            vx_smooth, vy_smooth = 0.0, 0.0
+        drone_vel[:2] = [vx_smooth, vy_smooth]
+
+    # -----------------------------
+    # 6. Advance UAV
+    # -----------------------------
     drone_pos += drone_vel * dt_step
 
     # -----------------------------
-    # 5. Update visualization
+    # 7. Update visualization
     # -----------------------------
     raster_belief[inside_idx] = belief
     sc.set_array(raster_belief)
     drone_plot.set_data(drone_pos[0], drone_pos[1])
+    if len(victims) > 0:
+        ax.plot(victims[:,0], victims[:,1], 'rx', markersize=8)
     plt.pause(0.01)
 
     # -----------------------------
-    # 6. Print status
+    # 8. Print status
     # -----------------------------
     mean_H = np.mean(cell_entropy_map(belief))
-    heading_deg = math.degrees(math.atan2(vy_smooth, vx_smooth))
+    heading_deg = math.degrees(np.arctan2(vy_smooth, vx_smooth))
     print(f"t={t:03d}s pos=({drone_pos[0]:.1f},{drone_pos[1]:.1f},{drone_pos[2]:.1f}) "
           f"vx={vx_smooth:.2f} vy={vy_smooth:.2f} vz={vz_des:.2f} heading={heading_deg:.2f} "
           f"vis_cells={np.sum(vis_mask)} mean_H={mean_H:.3f} J={Jval:.3f}")
+
+plt.ioff()
+plt.show()
