@@ -982,28 +982,6 @@ for t in range(250):
         if mode == "explore" and t >= cooldown_until[d_idx]
     ]
 
-
-    # ---------------------------------------------------------------
-    # (5.3) Rising-edge detection trigger
-    # ---------------------------------------------------------------
-    # max_p = np.max(belief_for_detection)
-
-    # if max_p > pth_detect and last_max_p <= pth_detect:
-    #     NEW_DETECTION = True
-    # else:
-    #     NEW_DETECTION = False
-
-    # # update memory of last-frame probability peak
-    # last_max_p = max_p
-
-
-    # # ---------------------------------------------------------------
-    # # (5.4) If no explorers OR no new detection event → skip
-    # # ---------------------------------------------------------------
-    # if len(eligible_explorers) == 0 or not NEW_DETECTION:
-    #     # Nothing new to do this frame
-    #     pass
-
     # ---------------------------------------------------------------
     # (5.3) FOV-based physical detection trigger
     # ---------------------------------------------------------------
