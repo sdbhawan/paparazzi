@@ -144,14 +144,6 @@
     </block>
     
 
-    <!-- <block name="GUIDED_START" key="g">
-	     <call_once fun="setGuided()"/>
-	     <stay wp="STDBY"/>
-    </block> -->
-
-
-
-
     <block name="Ghost" strip_button="Ghost" strip_icon="home.png" pre_call="rotwing_state_choose_state_by_dist(WP_STDBY)">
         <stay wp="Ghost"/>
     </block>
