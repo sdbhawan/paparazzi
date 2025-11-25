@@ -127,16 +127,29 @@ def smooth(cmd_prev, cmd_des, dt):
     v_slew = cmd_prev + delta
     return ALPHA_LP * cmd_des + (1-ALPHA_LP) * v_slew
 
-def send_guided(interface, ac_id, vx_enu, vy_enu, vz_enu):
-    vx_ned, vy_ned, vz_ned = ned_from_enu(vx_enu, vy_enu, vz_enu)
+def send_guided(interface, ac_id, vx_enu, vy_enu, vz_enu=0.0):
+    """
+    Multi-UAV safe wrapper to send GUIDED_SETPOINT_NED velocity commands
+    using ENU input (vx, vy, vz) from the planner.
+    """
+
+    # Convert ENU → NED (same convention used in example script)
+    vx_ned = vy_enu
+    vy_ned = vx_enu
+    vz_ned = -vz_enu
+
     msg = PprzMessage("datalink", "GUIDED_SETPOINT_NED")
-    msg["ac_id"] = int(ac_id)
-    msg["flags"] = np.packbits([0,0,0,0,0,1,0,0], bitorder="little")[0].astype(np.uint8)
-    msg["x"] = float(vx_ned)
-    msg["y"] = float(vy_ned)
-    msg["z"] = float(vz_ned)
-    msg["yaw"] = 0.0
+    msg['ac_id'] = int(ac_id)
+    msg['flags'] = np.packbits([0,0,0,0,0,1,0,0], bitorder='little')[0].astype(np.uint8)
+
+    msg['x'] = float(vx_ned)
+    msg['y'] = float(vy_ned)
+    msg['z'] = float(vz_ned)
+    msg['yaw'] = 0.0
+
     interface.send(msg, ac_id=int(ac_id))
+    print(f"[SEND] AC{ac_id}: vx_enu={vx_enu:.2f}, vy_enu={vy_enu:.2f}, vx_ned={vx_ned:.2f}, vy_ned={vy_ned:.2f}")
+
 
 def ivy_callback(agent, *args):
     print("IVY RAW:", args)
@@ -212,6 +225,22 @@ def planner_thread(interface):
             ])
             uav["log_f"].flush()
 
+
+
+def manual_test(interface):
+    """
+    Simple test: send different velocity commands to two UAVs.
+    AC 44 moves (vx=1, vy=5), AC 46 moves (vx=-1, vy=-5)
+    """
+
+    while True:
+        send_guided(interface, 44,  1.0,  5.0, 0.0)
+        send_guided(interface, 46, -1.0, -5.0, 0.0)
+
+        print("Sent test commands: AC44 -> (1,5), AC46 -> (-1,-5)")
+        time.sleep(0.2)   # 5 Hz
+
+
 def main():
     ivy_bus = os.getenv("PPRZ_IVY_BUS", "127.255.255.255:2010")
     interface = IvyMessagesInterface("multi_uav_bridge", ivy_bus=ivy_bus)
@@ -223,8 +252,11 @@ def main():
 
     interface.start()
 
-    th = threading.Thread(target=planner_thread, args=(interface,), daemon=True)
-    th.start()
+    # th = threading.Thread(target=planner_thread, args=(interface,), daemon=True)
+    # th.start()
+    print("[BRIDGE] Running manual velocity test.")
+    manual_test(interface)
+
 
     print("[BRIDGE] Running. Ctrl+C to stop.")
     try:

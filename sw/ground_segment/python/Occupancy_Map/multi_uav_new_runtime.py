@@ -13,7 +13,7 @@ import numpy as np
 # Import EVERYTHING you already defined (functions + globals)
 # IMPORTANT: multi_uav_new.py must NOT auto-run on import.
 # So we do a safe import by telling you to add a small guard.
-import multi_uav_new as core
+import multi_uav_paparazzi as core
 
 
 class SwarmPlanner:
