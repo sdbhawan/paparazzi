@@ -52,15 +52,15 @@ dt_step = 1.0
 v_drift = np.array([1.7, 1.0])
 theta_FOV = np.deg2rad(45)
 E_scale = 100.0
-E_scale_track = 50.0
+E_scale_track = 40.0
 gamma_wind = 5.0
 v_wind = v_drift.copy()             # treat wind ≈ drift for Deff (7.46)
 v_max = 20.0        # max velocity [m/s]
 
-confirm_pconf = 0.25
+confirm_pconf = 0.6
 peak_tresh = 0.75
-mean_thresh = 0.25
-rho_th = 0.3
+mean_thresh = 0.4
+rho_th = 0.25
 
 # -----------------------------
 # CORE FUNCTIONS
@@ -1128,40 +1128,12 @@ if __name__ == "__main__":
                         drone_modes[d_idx] = "explore"
                         continue
 
-                
-
-                # === TRACKER STATE MACHINE (per UAV) ===
-                # if tr["phase"] == "to_detection":
-                #     # Fix: Track the drifting target, not the static detection point
-                #     t_elapsed = t - tr["time"]
-                #     target_now = tr["pos"] + v_drift * t_elapsed
-                    
-                #     vec = target_now - drone_positions[d_idx][:2]
-                #     dist = np.linalg.norm(vec)
-                #     print(f"[t={t}] UAV{d_idx} distance to moving target={dist:.2f} m")
-
-                #     # Braking logic: Slow down as we get closer
-                #     if dist > 40.0: 
-                #         dir_unit = vec / (dist + 1e-6)
-                #         # Linear braking: 20m/s at distance, slowing to 2m/s at 40m
-                #         speed = np.clip((dist - 40.0) * 0.5, 5.0, v_max)
-                #         vx_des, vy_des = dir_unit * speed
-                #         vz_des = 0.0
-                #     else:
-                #         # ARRIVED
-                #         tr["phase"] = "initial_lock"
-                #         tr["lock_start"] = t
-                #         print(f"[t={t}] UAV{d_idx} arrived → starting initial lock on cone.")
-                #         # Match drift velocity immediately to stop relative motion
-                #         vx_des, vy_des = v_drift[0], v_drift[1]
-                #         vz_des = 0.0
-
                 if tr["phase"] == "to_detection":
                     # Fix: Track the drifting target, not the static detection point
                     t_elapsed = t - tr["time"]
                     raw_target = tr["pos"] + v_drift * t_elapsed
                     
-                    # --- GEOFENCE CLAMP (The Fix) ---
+                    # --- GEOFENCE CLAMP ---
                     # If victim drifted out of bounds, target the nearest valid point on the boundary.
                     # This prevents the drone from getting stuck fighting the geofence constraint.
                     target_point = Point(raw_target[0], raw_target[1])
@@ -1327,21 +1299,25 @@ if __name__ == "__main__":
                         continue
 
                     # =============================================================
-                    # 4. MOTION LOGIC (The Fixes)
+                    # 4. MOTION LOGIC 
                     # =============================================================
                     t_elapsed = t - det_time
                     drift_center = det_pos + v_drift * t_elapsed
                     
-                    # FIX: Pass 'drone_vels[d_idx]' and 'constraint_poly'
+                    # Pass 'drone_vels[d_idx]' and 'constraint_poly'
+                    # BUFFER THE CONE: Allow the drone to be 10m outside without panicking.
+                    # This creates a "Soft Wall" so it curves back in smoothly.
+                    soft_cone_constraint = region_poly.buffer(10.0) 
+                    
                     vx_ipp, vy_ipp, vz_ipp, best_path, _, _ = plan_velocity_ipp_3D(
                         drone_positions[d_idx], 
-                        drone_vels[d_idx],      # <--- Added
+                        drone_vels[d_idx],
                         belief, grid_points, soft_poly,
-                        constraint_poly=region_poly, # <--- Added
+                        constraint_poly=soft_cone_constraint, # <--- USE BUFFERED POLYGON
                         step_length=20.0,
                         fov_angle=theta_FOV, v_max=v_max, 
-                        altitude_candidates=[drone_positions[d_idx][2]], # Maintain current alt
-                        pred_depth=2, E_scale=E_scale_track,   # Matches Table 5.1
+                        altitude_candidates=[drone_positions[d_idx][2]], 
+                        pred_depth=2, E_scale=E_scale_track,
                         lam=0.5,       
                         buffer=buffer
                     )
@@ -1353,7 +1329,6 @@ if __name__ == "__main__":
                     # Use IPP vertical velocity ONLY if your descent logic didn't set one
                     if 'vz_des' not in locals():
                         vz_des = vz_ipp
-
 
 
                 elif tr["phase"] == "hover_confirm":
@@ -1375,31 +1350,45 @@ if __name__ == "__main__":
                             v_drift=v_drift
                     )
 
-                    # --- 2. STABILIZED TARGETING (Low-Pass Filter) ---
+                    # --- 2. STABILIZED TARGETING (With Gating) ---
                     hotspot_mask = (belief > confirm_pconf) & vis_mask_inside
                     
                     has_visual_lock = False
                     raw_target = None
 
-                    # A. Calculate Raw Target (Peak Chasing)
+                    # Calculate "Theoretical" position (Anchor)
+                    t_elapsed = t - det_time
+                    theoretical_center = det_pos + v_drift * t_elapsed
+
+                    # A. Calculate Visual Candidate
                     if np.sum(hotspot_mask) > 3:
-                        has_visual_lock = True
                         coords = grid_points[hotspot_mask]
                         probs = belief[hotspot_mask]
+                        # Peak Chasing (Weighted Centroid)
                         weights = probs ** 2
-                        raw_target = np.average(coords, axis=0, weights=weights)
+                        visual_centroid = np.average(coords, axis=0, weights=weights)
+                        
+                        # --- GATING / TRUST CHECK ---
+                        # Only trust visual targets within 20m of the expected location.
+                        # This prevents chasing "ghosts" (old signals) far away.
+                        divergence = np.linalg.norm(visual_centroid - theoretical_center)
+                        
+                        if divergence < 20.0:
+                            has_visual_lock = True
+                            raw_target = visual_centroid
+                        else:
+                            # print(f"[t={t}] Gating: Rejecting outlier {divergence:.1f}m away.")
+                            raw_target = theoretical_center
+                            has_visual_lock = False 
                     else:
-                        # Fallback to drift model
-                        t_elapsed = t - det_time
-                        raw_target = det_pos + v_drift * t_elapsed
+                        # No signal? Fallback to drift model
+                        raw_target = theoretical_center
 
-                    # B. Filter Initialization (THE FIX)
-                    # If this is the first frame, SNAP to the target immediately.
+                    # B. Filter Initialization (Snap to Target)
                     if "target_smooth" not in tr or tr["target_smooth"] is None:
-                        tr["target_smooth"] = raw_target  # <--- FIXED: Snap to target, not drone pos
+                        tr["target_smooth"] = raw_target  # <--- Snap immediately
 
                     # C. Apply Low-Pass Filter
-                    # alpha = 0.4 offers good balance: smooths noise but keeps up with drift.
                     alpha = 0.4
                     tr["target_smooth"] = alpha * tr["target_smooth"] + (1 - alpha) * raw_target
                     target_xy = tr["target_smooth"]
@@ -1417,23 +1406,18 @@ if __name__ == "__main__":
                     else:
                         vx_cmd, vy_cmd = 0.0, 0.0
                     
-                    # Feedforward Term (Anticipate Drift)
+                    # Feedforward Term
                     vx_des = vx_cmd + v_drift[0]
                     vy_des = vy_cmd + v_drift[1]
 
-                    # Vertical: Coupled Descent Logic
                     # Vertical: Coupled Descent Logic with GRADUATED THRESHOLD
                     current_alt = drone_positions[d_idx][2]
                     
-                    # Define acceptable error based on altitude
-                    # High up (80m) -> Allow 10m error
-                    # Low down (20m) -> Allow 2m error
+                    # High up (80m) -> Allow 10m error. Low down (20m) -> Allow 2m error.
                     allowed_err = np.interp(current_alt, [20.0, 80.0], [2.0, 10.0])
                     
                     if has_visual_lock and dist_err > allowed_err:
                         vz_des = 0.0  # Too far off, fix horizontal first
-                        # Optional: Print debug to see why it's pausing
-                        # print(f"[t={t}] Pausing descent. Err={dist_err:.1f}m > Allow={allowed_err:.1f}m")
                     elif current_alt > 20.0:
                         vz_des = -1.5 # Safe to descend
                     else:
@@ -1477,18 +1461,25 @@ if __name__ == "__main__":
                         f"(Thresh: ρ={rho_th}, mean={mean_thresh})"
                     )
 
-                    required_confirmation_alt = 22.0
+                    # Dynamic Confirmation Ceiling
+                    if mean_p >= 0.90:
+                        required_confirmation_alt = 35.0
+                    elif mean_p >= 0.70:
+                        required_confirmation_alt = 28.0
+                    else:
+                        required_confirmation_alt = 22.0
+                        
                     alt_ready = (current_alt <= required_confirmation_alt)
 
                     if (
-                        alt_ready and
+                        alt_ready and n_cells > 0 and
                         (
                             frac_high >= rho_th or
                             mean_p >= mean_thresh or
                             (len(p_vals) > 0 and max_p >= peak_tresh)
                         )
                     ):
-                        print(f"[t={t}] UAV{d_idx} confirmed victim → resuming exploration.")
+                        print(f"[t={t}] UAV{d_idx} CONFIRMED victim at alt={current_alt:.1f}m.")
                         
                         belief = clear_confirmed_region(belief, grid_points, det_pos, v_drift)
                         diff = grid_points - det_pos
@@ -1511,192 +1502,13 @@ if __name__ == "__main__":
                     ):
                         print(f"[t={t}] UAV{d_idx} hover-confirm timeout → aborting.")
                         
-                        tr["active"] = False
-                        tr["confirmed"] = False
-                        tr["phase"] = None
-                        tr["pos"] = None
-                        tr["time"] = None
-                        tr["hover_start"] = None
-
+                        tr["active"] = False; tr["confirmed"] = False; tr["phase"] = None
+                        tr["pos"] = None; tr["time"] = None; tr["hover_start"] = None
                         drone_modes[d_idx] = "explore"
-
                         nominal_alt = uav_nominal_altitudes[d_idx]
                         vz_des = np.clip(nominal_alt - current_alt, -2.0, 2.0)
                         vx_des, vy_des = 0.0, 0.0
                         continue
-
-                                
-
-                # elif tr["phase"] == "hover_confirm":
-                #     det_pos = tr["pos"]
-                #     det_time = tr["time"]
-                #         # --- STEP C: Initialize hover timer if first entry ---
-                #     if "hover_start" not in tr or tr["hover_start"] is None:
-                #         tr["hover_start"] = t
-
-
-                #     # --- recompute current cone region based on t ---
-                #     region_poly, center_R, radius_R = tracking_region(
-                #             t_now=t,
-                #             detection_pos=track[d_idx]["pos"],
-                #             detection_time=track[d_idx]["time"],
-                #             v_drift=v_drift
-                #     )
-
-
-                #     # 1) Follow drifting cone center
-                #     t_elapsed = t - det_time
-                #     drift_center = det_pos + v_drift * t_elapsed
-
-                #     vec = drift_center - drone_positions[d_idx][:2]
-                #     dist = np.linalg.norm(vec)
-
-                #     if dist > 5.0:
-                #         dir_unit = vec / (dist + 1e-6)
-                #         vx_des = dir_unit[0] * 3.0
-                #         vy_des = dir_unit[1] * 3.0
-                #     else:
-                #         vx_des = vy_des = 0.0
-
-                #     # 2) Descend gently
-                #     current_alt = drone_positions[d_idx][2]
-                #     descent_alt = 20.0
-                #     vz_des = -1.5 if current_alt > descent_alt else 0.0
-
-                #     # 3) Compute FOV belief stats
-                #     vis_mask_inside, _ = visible_cells_at(
-                #         drone_positions[d_idx],
-                #         grid_points
-                #     )
-
-                #     # ... [Inside hover_confirm, after calculating stats] ...
-                    
-                #     # 4) ABORT CONDITION: Lost Signal
-                #     # If we are descending but the probability has collapsed, ABORT immediately.
-                #     if current_alt < 70.0 and mean_p < 0.20 and max_p < 0.40:
-                #         print(f"[t={t}] UAV{d_idx} signal lost during descent (mean_p={mean_p:.2f}) → ABORT.")
-                        
-                #         # Reset tracking state
-                #         tr["active"] = False
-                #         tr["confirmed"] = False
-                #         tr["pos"] = None
-                #         tr["time"] = None
-                #         tr["phase"] = None
-                #         tr["hover_start"] = None
-                        
-                #         drone_modes[d_idx] = "explore"
-                        
-                #         # Climb out immediately
-                #         nominal_alt = uav_nominal_altitudes[d_idx]
-                #         vz_des = np.clip(nominal_alt - current_alt, 0.5, 2.0)
-                        
-                #         # IMPORTANT: Don't forget to zero horizontal velocity or let IPP handle it next frame
-                #         vx_des, vy_des = 0.0, 0.0
-                        
-                #         continue
-
-                #     region_mask_inside = np.array([
-                #         region_poly.contains(Point(p)) for p in grid_points
-                #     ]) if (region_poly is not None and not region_poly.is_empty) else np.zeros(len(grid_points), dtype=bool)
-
-                #     hover_mask = vis_mask_inside & region_mask_inside
-                #     n_cells = int(np.sum(hover_mask))
-
-                #     frac_high = 0.0
-                #     mean_p = 0.0
-                #     p_vals = np.array([])
-
-                #     if n_cells > 0:
-                #         p_vals = belief[hover_mask]
-                #         frac_high = np.mean(p_vals > confirm_pconf)
-                #         mean_p = np.mean(p_vals)
-
-                #     print(
-                #         f"[DEBUG hover t={t}] alt={current_alt:.1f}  "
-                #         f"n_cells={n_cells}  frac_high={frac_high:.3f}  mean_p={mean_p:.3f}  "
-                #         f"(rho_th={rho_th}, confirm_pconf={confirm_pconf}, mean_thresh={mean_thresh})"
-                #     )
-                #     if 0 < n_cells < 10:
-                #         print(f"[WARN hover t={t}] hover_mask too small (n_cells={n_cells}) — check FOV/grid settings.")
-
-                #     print(
-                #         f"[DEBUG hover t={t}] conditions: "
-                #         f"(frac_high >= rho_th)={frac_high >= rho_th}  "
-                #         f"(mean_p >= mean_thresh)={mean_p >= mean_thresh}"
-                #     )
-
-                #     required_confirmation_alt = 22.0
-                #     alt_ready = (current_alt <= required_confirmation_alt)
-
-                #     if (
-                #         alt_ready and
-                #         (
-                #             frac_high >= rho_th or
-                #             mean_p >= mean_thresh or
-                #             (len(p_vals) > 0 and np.max(p_vals) >= peak_tresh)
-                #         )
-                #     ):
-                #         print(f"[t={t}] UAV{d_idx} confirmed victim → resuming exploration.")
-
-                #         # (A) CLEAR VICTIM REGION FROM BELIEF
-                #         belief = clear_confirmed_region(
-                #             belief,
-                #             grid_points,
-                #             det_pos,
-                #             v_drift,
-                #             major_axis=120.0,
-                #             minor_axis=60.0,
-                #             decay=0.01
-                #         )
-
-                #         # extra hard clear around the detection position
-                #         clear_r = 50.0
-                #         cp = det_pos
-                #         diff = grid_points - cp
-                #         mask = (diff[:, 0]**2 + diff[:, 1]**2) <= clear_r**2
-                #         belief[mask] *= 0.05
-
-                #         print(f"[t={t}] Fully cleared victim region and renormalized belief.")
-
-                #         # (B) Reset this UAV's tracking state
-                #         tr["active"] = False
-                #         tr["confirmed"] = True
-                #         tr["pos"] = None
-                #         tr["time"] = None
-                #         tr["phase"] = None
-                #         tr["hover_start"] = None
-
-
-                #         drone_modes[d_idx] = "explore"
-
-                #         nominal_alt = uav_nominal_altitudes[d_idx]
-                #         vz_des = np.clip(nominal_alt - current_alt, -2.0, 2.0)
-
-                #         # ---------------------------------------------------------
-                #     # STEP C: hover-confirm timeout (10 seconds at min altitude)
-                #     # Only do this when we have NOT confirmed yet.
-                #     # ---------------------------------------------------------
-                #     if (
-                #         alt_ready
-                #         and tr.get("hover_start") is not None
-                #         and (t - tr["hover_start"]) > 10.0
-                #     ):
-                #         print(f"[t={t}] UAV{d_idx} hover-confirm timeout → aborting and returning to IPP.")
-
-                #         # Reset tracking state
-                #         tr["active"] = False
-                #         tr["confirmed"] = False
-                #         tr["pos"] = None
-                #         tr["time"] = None
-                #         tr["phase"] = None
-                #         tr["hover_start"] = None
-
-                #         drone_modes[d_idx] = "explore"
-
-                #         nominal_alt = uav_nominal_altitudes[d_idx]
-                #         vz_des = np.clip(nominal_alt - current_alt, -2.0, 2.0)
-
-                #         continue
 
 
 
@@ -1714,21 +1526,50 @@ if __name__ == "__main__":
      
                 )
 
-            # Smooth heading change (unchanged)
-            speed = np.linalg.norm([vx_des, vy_des])
-            if speed < 1e-3:
-                vx_smooth, vy_smooth = 0.0, 0.0
-            else:
-                current_heading = np.arctan2(drone_vels[d_idx][1], drone_vels[d_idx][0])
-                desired_heading = np.arctan2(vy_des, vx_des)
-                delta_heading = (desired_heading - current_heading + np.pi) % (2 * np.pi) - np.pi
-                delta_heading = np.clip(delta_heading, -max_dheading * dt_step, max_dheading * dt_step)
-                new_heading = current_heading + delta_heading
-                vx_smooth = speed * np.cos(new_heading)
-                vy_smooth = speed * np.sin(new_heading)
+            # --- MOTION SMOOTHING (Physics-Compliant) ---
+            
+            if drone_modes[d_idx] == "track":
+                # ACCELERATION LIMITER
+                # Instead of snapping instantly (infinite G-force), we clamp the 
+                # change in velocity to max_accel. This smooths the "jumps" 
+                # but allows braking/reversing without turning (Holonomic).
+                
+                v_current = drone_vels[d_idx][:2]
+                v_target = np.array([vx_des, vy_des])
+                
+                # Calculate the requested jump
+                delta_v = v_target - v_current
+                dist_v = np.linalg.norm(delta_v)
+                
+                # Limit: Max 6 m/s change per second (approx 0.6G braking)
+                # You can increase this to 10.0 if you need snappier response.
+                max_accel = 6.0 
+                max_change = max_accel * dt_step
+                
+                if dist_v > max_change:
+                    delta_v = delta_v / dist_v * max_change
+                    
+                drone_vels[d_idx][:2] = v_current + delta_v
+                drone_vels[d_idx][2] = vz_des
 
-            drone_vels[d_idx][:2] = [vx_smooth, vy_smooth]
-            drone_vels[d_idx][2] = vz_des
+            else:
+                # Smooth "Cinematic" movement for exploration (Legacy Fixed-Wing style)
+                speed = np.linalg.norm([vx_des, vy_des])
+                if speed < 1e-3:
+                    vx_smooth, vy_smooth = 0.0, 0.0
+                else:
+                    current_heading = np.arctan2(drone_vels[d_idx][1], drone_vels[d_idx][0])
+                    desired_heading = np.arctan2(vy_des, vx_des)
+                    
+                    delta_heading = (desired_heading - current_heading + np.pi) % (2 * np.pi) - np.pi
+                    delta_heading = np.clip(delta_heading, -max_dheading * dt_step, max_dheading * dt_step)
+                    
+                    new_heading = current_heading + delta_heading
+                    vx_smooth = speed * np.cos(new_heading)
+                    vy_smooth = speed * np.sin(new_heading)
+                    
+                drone_vels[d_idx][:2] = [vx_smooth, vy_smooth]
+                drone_vels[d_idx][2] = vz_des
 
         # ------------------------------------------
         # 7. Boundary correction
@@ -1758,9 +1599,10 @@ if __name__ == "__main__":
         # ============================
         # Energy consumption update
         # ============================
-        # Battery: Updated to realistic capacity for a heavy lift drone (~500 Wh)
-        # Old: 1000 W*min (~16 Wh) -> New: 30000 W*min (~500 Wh)
-        battery_capacity = 30000.0 * 60  
+        # 300 Wh
+        # 300 Wh * 60 min/h = 18,000 W*min
+        # 18,000 W*min * 60 sec/min = 1,080,000 Joules
+        battery_capacity = 18000.0 * 60 
         E_scale = E_max / battery_capacity
 
         for d_idx in range(num_drones):
