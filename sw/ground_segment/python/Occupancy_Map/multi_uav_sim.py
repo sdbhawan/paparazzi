@@ -49,12 +49,13 @@ cell_size = float(grid_x[1] - grid_x[0])
 # -----------------------------
 
 dt_step = 1.0
-v_drift = np.array([1.7, 1.0])
+v_drift = np.array([-1.7, -1.0])
 theta_FOV = np.deg2rad(45)
 E_scale = 100.0
 E_scale_track = 40.0
 gamma_wind = 5.0
 v_wind = v_drift.copy()             # treat wind ≈ drift for Deff (7.46)
+v_wind =v_wind
 v_max = 20.0        # max velocity [m/s]
 
 confirm_pconf = 0.6

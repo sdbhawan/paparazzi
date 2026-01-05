@@ -9,106 +9,16 @@ import pymap3d as pm
 from scipy.spatial import cKDTree
 from scipy.ndimage import gaussian_filter
 from shapely.affinity import rotate, translate
+import time
+import threading  
 
 # --- SETTINGS ---
-USE_PPRZ = False
 RANDOM_SEED = 112
 random.seed(RANDOM_SEED)
 
 # --- Paparazzi setup ---
 PPRZ_HOME = os.getenv("PAPARAZZI_HOME", os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../../..')))
 sys.path.append(PPRZ_HOME + "/sw/ext/pprzlink/lib/v1.0/python")
-
-class PaparazziBridge:
-    def __init__(self, ac_id):
-        from pprzlink.ivy import IvyMessagesInterface
-        from pprzlink.message import PprzMessage
-        import pymap3d as pm
-
-        self.ac_id = ac_id
-        self.pm = pm
-        self.lat0, self.lon0, self.alt0 = 52.1681551, 4.4126468, 0.0
-
-        self.state = {"x": None, "y": None, "z": None,
-                      "vx": None, "vy": None, "vz": None}
-
-        self.iface = IvyMessagesInterface(f"uav_bridge_{ac_id}")
-        self.iface.subscribe(self._on_gps)
-        self.iface.subscribe(self._on_ins)
-        self.iface.start()
-
-        print(f"[PPRZ] Bridge initialized for AC{ac_id}")
-
-    def _on_gps(self, ac_id, msg):
-        if msg.name != "GPS_INT": return
-        if int(ac_id) != self.ac_id: return
-
-        lat = float(msg["lat"]) * 1e-7
-        lon = float(msg["lon"]) * 1e-7
-        alt = float(msg["alt"]) / 100.0
-
-        x, y, z = self.pm.geodetic2enu(lat, lon, alt,
-                                       self.lat0, self.lon0, self.alt0)
-        self.state["x"] = x
-        self.state["y"] = y
-        self.state["z"] = z
-
-    def _on_ins(self, ac_id, msg):
-        if msg.name != "INS": return
-        if int(ac_id) != self.ac_id: return
-
-        POS = 0.0039063
-        VEL = 0.0000019
-
-        north = float(msg["ins_x"]) * POS
-        east  = float(msg["ins_y"]) * POS
-        up    = -float(msg["ins_z"]) * POS
-
-        vn = float(msg["ins_xd"]) * VEL
-        ve = float(msg["ins_yd"]) * VEL
-        vu = -float(msg["ins_zd"]) * VEL
-
-        self.state["x"] = east
-        self.state["y"] = north
-        self.state["z"] = up
-        self.state["vx"] = ve
-        self.state["vy"] = vn
-        self.state["vz"] = vu
-
-    def state_position(self):
-        if self.state["x"] is None:
-            return None
-        return np.array([self.state["x"], self.state["y"], self.state["z"]])
-
-    def send_guided_setpoint(self, vx_enu, vy_enu, vz_enu):
-        from pprzlink.message import PprzMessage
-
-        vx_ned = vy_enu
-        vy_ned = vx_enu
-        vz_ned = -vz_enu
-
-        msg = PprzMessage("datalink", "GUIDED_SETPOINT_NED")
-        msg["ac_id"] = self.ac_id
-        msg["flags"] = 32  # x,y as velocity
-
-        msg["x"] = vx_ned
-        msg["y"] = vy_ned
-        msg["z"] = vz_ned
-        msg["yaw"] = 0
-
-        self.iface.send(msg, ac_id=self.ac_id)
-
-
-USE_PPRZ = True   # or False
-
-# Example with 4 drones
-uav_config = {
-    0: {"real": True,  "ac_id": 37},
-    1: {"real": False},
-    2: {"real": False},
-    3: {"real": False},
-}
-
 
 
 lat0, lon0, alt0 = 52.1681551, 4.4126468, 0.0
@@ -155,7 +65,7 @@ pth_detect = 0.77
 rho_th = 0.2
 gamma_wind = 5.0
 v_wind = v_drift.copy()             # treat wind ≈ drift for Deff (7.46)
-uav_nominal_altitudes = np.array([80.0, 40.0])  # UAV0 = high-alt, UAV1 = low-alt
+uav_nominal_altitudes = np.array([100.0, 50.0])  # UAV0 = high-alt, UAV1 = low-alt
 
 # -----------------------------
 # CORE FUNCTIONS
@@ -687,6 +597,119 @@ def active_cone_mask(t_now, grid_points, track, v_drift):
     return mask
 
 
+##############################################
+######## Papararazzi functions ###############
+##############################################
+from pprzlink.ivy import IvyMessagesInterface
+from pprzlink.message import PprzMessage
+
+
+# --- IVY / PPRZ CONFIGURATION ---
+IVY_APP_NAME = "Multi_UAV_Planner"
+# Map simulation index to Pprz Aircraft IDs
+# Example: UAV0 is ID 44, UAV1 is ID 46
+AC_MAP = {
+    0: 44, 
+    1: 46 
+}
+
+def send_guided(interface, ac_id, vx_enu, vy_enu, vz_enu=0.0):
+    """
+    Sends velocity setpoints to Pprz via Ivy.
+    Converts ENU (Sim) -> NED (Pprz standard).
+    """
+    # Convert ENU -> NED
+    # X_ned = Y_enu (North)
+    # Y_ned = X_enu (East)
+    # Z_ned = -Z_enu (Down)
+    vx_ned = vy_enu
+    vy_ned = vx_enu
+    vz_ned = -vz_enu
+
+    msg = PprzMessage("datalink", "GUIDED_SETPOINT_NED")
+    msg['ac_id'] = int(ac_id)
+    # Flags: 0x20 (bit 5 set) indicates velocity control in standard Pprz bitmasks
+    # The snippet you provided used a specific bitmask, we will use that:
+    msg['flags'] = np.packbits([0,0,0,0,0,1,0,0], bitorder='little')[0].astype(np.uint8)
+    
+    msg['x'] = float(vx_ned)
+    msg['y'] = float(vy_ned)
+    msg['z'] = float(vz_ned)
+    msg['yaw'] = 0.0 # We let the drone handle yaw based on velocity vector usually
+
+    interface.send(msg, ac_id=int(ac_id))
+    # Optional: print less frequently to avoid console spam
+    # print(f"[IVY] AC{ac_id} >> v_ned: ({vx_ned:.2f}, {vy_ned:.2f}, {vz_ned:.2f})")
+
+
+# def on_gps_int(ac_id, msg):
+#     """
+#     Updates the specific drone's position from real-time GPS_INT messages.
+#     """
+#     if msg.name != "GPS_INT": 
+#         return
+
+#     ac_id = int(ac_id)
+    
+#     # Identify which drone this is (0 or 1)
+#     sim_idx = AC_ID_TO_SIM_IDX.get(ac_id)
+#     if sim_idx is None:
+#         return  # Message from an unknown aircraft
+
+#     # Parse Pprz message (integers) to Float
+#     # Note: Ensure the scaling /100.0 or /1000.0 matches your specific Pprz settings
+#     lat = float(msg["lat"]) * 1e-7
+#     lon = float(msg["lon"]) * 1e-7
+#     alt = float(msg["alt"]) / 1000.0  # Standard Pprz is mm -> meters. Check if you need 100.0.
+
+#     # Convert Geodetic -> Local ENU
+#     # Uses the global lat0, lon0, alt0 defined at the top of your script
+#     x, y, z = pm.geodetic2enu(lat, lon, alt, lat0, lon0, alt0)
+
+#     # Thread-safe update
+#     with LOCK:
+#         drone_positions[sim_idx] = np.array([x, y, z])
+#         got_first_fix[sim_idx] = True
+
+
+# Approximate difference between WGS84 (GPS) and MSL (Ground) in the Netherlands
+# Based on your logs, the ground is exactly at 41.7m WGS84
+GEOID_OFFSET = 41.7
+
+def on_gps_int(ac_id, msg):
+    """
+    Updates the specific drone's position from real-time GPS_INT messages.
+    """
+    if msg.name != "GPS_INT": 
+        return
+
+    ac_id = int(ac_id)
+    
+    sim_idx = AC_ID_TO_SIM_IDX.get(ac_id)
+    if sim_idx is None:
+        return 
+
+    lat = float(msg["lat"]) * 1e-7
+    lon = float(msg["lon"]) * 1e-7
+    
+    # --- FIX: SUBTRACT THE OFFSET ---
+    # Convert mm to meters, then remove the WGS84 bias
+    raw_alt = float(msg["alt"]) / 1000.0
+    alt = raw_alt - GEOID_OFFSET
+    # --------------------------------
+
+    x, y, z = pm.geodetic2enu(lat, lon, alt, lat0, lon0, alt0)
+
+    with LOCK:
+        drone_positions[sim_idx] = np.array([x, y, z])
+        got_first_fix[sim_idx] = True
+
+
+# --- GLOBAL LOCK & CONFIGURATION ---
+LOCK = threading.Lock()
+
+# Reverse map to find Sim Index (0 or 1) from AC_ID 
+AC_ID_TO_SIM_IDX = {v: k for k, v in AC_MAP.items()}
 
 confirm_pconf = 0.25
 rho_th_fov = 0.1
@@ -858,7 +881,7 @@ vel_history = [np.empty((0, 3)) for _ in range(num_drones)]
 # SIMULATION LOOP (multi-UAV)
 # -----------------------------
 max_dheading = np.deg2rad(10)  # max heading change per second
-buffer = FOV_radius  # safe buffer for polygon
+buffer = FOV_radius * 1.5  # safe buffer for polygon
 
 # Create a buffered polygon for safe navigation
 safe_poly = soft_poly.buffer(-buffer) if buffer > 0 else soft_poly
@@ -873,6 +896,10 @@ detection_pos = [None]*num_drones
 detection_time = [None]*num_drones
 tracker_phase = [None]*num_drones
 cooldown_until = np.zeros(num_drones)
+
+# Flags to track initialization
+got_first_fix = [False] * num_drones
+
 COOLDOWN_TIME = 30  # seconds of detection lockout
 cone_artists = []
 
@@ -933,8 +960,27 @@ for d_idx in range(num_drones):
 
 if __name__ == "__main__":
     
+    # 1. INITIALIZE IVY INTERFACE
+    ivy_bus = os.getenv("PPRZ_IVY_BUS", "127.255.255.255:2010")
+    # print(f"Initializing Ivy on {ivy_bus}...")
+    interface = IvyMessagesInterface(IVY_APP_NAME, ivy_bus=ivy_bus)
+
+    interface.subscribe(on_gps_int)
+
+    # 2. WAITING FOR GPS FIX (New Initialization)
+    print("Waiting for GPS fixes from all UAVs...")
+    while not all(got_first_fix):
+        time.sleep(0.5)
+        # Optional: Print status
+        # missing = [AC_MAP[i] for i, done in enumerate(got_first_fix) if not done]
+        # print(f"Waiting for ACs: {missing}")
+
+    print("GPS Initialized! Starting Planner Loop.")
 
     for t in range(250):
+
+        with LOCK:
+            current_positions = [p.copy() for p in drone_positions]
         # ------------------------------------------
         # 0. Dynamic mapping: propagate belief (drift model)
         # ------------------------------------------
@@ -964,7 +1010,7 @@ if __name__ == "__main__":
 
 
         for d_idx in range(num_drones):
-            vis_mask_all, p_hit_all = visible_cells_at(drone_positions[d_idx], grid_points_all)
+            vis_mask_all, p_hit_all = visible_cells_at(current_positions[d_idx], grid_points_all)
 
             vis_mask_inside = vis_mask_all[inside_mask_full]       # mask over grid_points
             p_hit_inside = p_hit_all[inside_mask_full]             # probabilities over grid_points
@@ -995,7 +1041,7 @@ if __name__ == "__main__":
 
         for d_idx in range(num_drones):
 
-            drone_pos = drone_positions[d_idx]
+            drone_pos = current_positions[d_idx]
 
             # Visibility on the belief grid (not full grid)
             vis_mask, p_hit = visible_cells_at(drone_pos, grid_points)
@@ -1093,7 +1139,7 @@ if __name__ == "__main__":
                 continue
 
             # Victim must be physically inside the FOV of this UAV
-            vis_mask, _ = visible_cells_at(drone_positions[d_idx], grid_points)
+            vis_mask, _ = visible_cells_at(current_positions[d_idx], grid_points)
             if not np.any(victim_cell_mask[vis_mask]):
                 continue
 
@@ -1164,7 +1210,7 @@ if __name__ == "__main__":
                 best_d, best_cost = None, np.inf
 
                 for d_idx in eligible_explorers:
-                    r = detection_pos - drone_positions[d_idx][:2]
+                    r = detection_pos - current_positions[d_idx][:2]
                     dist = np.linalg.norm(r)
                     r_hat = r / (dist + 1e-6)
                     Deff = dist + gamma_wind * abs(np.dot(v_wind[:2], r_hat))
@@ -1200,7 +1246,7 @@ if __name__ == "__main__":
             if drone_modes[d_idx] == "explore":
                 # 1) Plan horizontal motion normally
                 vx_des, vy_des, vz_des, *_ = plan_velocity_ipp_3D(
-                    drone_positions[d_idx], belief, grid_points, soft_poly,
+                    current_positions[d_idx], belief, grid_points, soft_poly,
                     fov_angle=theta_FOV, v_max=v_max, n_directions=16,
                     step_length=40.0, I_scale=I_scale, E_scale=E_scale,
                     alpha_d=alpha_d, buffer=buffer, pred_depth=pred_depth
@@ -1208,7 +1254,7 @@ if __name__ == "__main__":
 
                 # 2) Maintain nominal altitude
                 target_alt = uav_nominal_altitudes[d_idx]
-                current_alt = drone_positions[d_idx][2]
+                current_alt = current_positions[d_idx][2]
                 vz_hold = np.clip(target_alt - current_alt, -1.0, 1.0)
                 vz_des = vz_hold
 
@@ -1217,7 +1263,7 @@ if __name__ == "__main__":
                 # === TRACKER STATE MACHINE (per UAV) ===
                 if tr["phase"] == "to_detection":
                     det_pos = tr["pos"]
-                    vec = det_pos - drone_positions[d_idx][:2]
+                    vec = det_pos - current_positions[d_idx][:2]
                     dist = np.linalg.norm(vec)
                     print(f"[t={t}] UAV{d_idx} distance to detection={dist:.2f} m")
 
@@ -1253,7 +1299,7 @@ if __name__ == "__main__":
                     )
 
                     # Move toward the drifting cone center
-                    vec_center = center_R - drone_positions[d_idx][:2]
+                    vec_center = center_R - current_positions[d_idx][:2]
                     dist_center = np.linalg.norm(vec_center)
 
                     if dist_center > 5.0:
@@ -1316,9 +1362,9 @@ if __name__ == "__main__":
                             # ALTITUDE DESCENT LOGIC (Step C addition)
                             # -------------------------------------------------------------
                             # If we see *some* evidence (not enough for success), descend gradually
-                            if max_p > 0.20 and (drone_positions[d_idx][2] > MIN_ALT + 0.5):
+                            if max_p > 0.20 and (current_positions[d_idx][2] > MIN_ALT + 0.5):
                                 # Descend slowly as probability increases
-                                current_alt = drone_positions[d_idx][2]
+                                current_alt = current_positions[d_idx][2]
                                 target_alt = max(MIN_ALT, current_alt - DESCENT_STEP)
 
                                 vz_des = np.clip(target_alt - current_alt, -1.5, 0.0)  # descend at 1.5 m/s
@@ -1328,7 +1374,7 @@ if __name__ == "__main__":
                             # -------------------------------------------------------------
                             # 2. ALTITUDE-BASED FAILURE (your original logic)
                             # -------------------------------------------------------------
-                            z = drone_positions[d_idx][2]
+                            z = current_positions[d_idx][2]
                             if z <= MIN_ALT + 0.5:     # UAV already at minimum altitude
                                 tr["fail_timer"] += dt
 
@@ -1387,7 +1433,7 @@ if __name__ == "__main__":
 
                                 drone_modes[d_idx] = "explore"
 
-                                current_alt = drone_positions[d_idx][2]
+                                current_alt = current_positions[d_idx][2]
                                 nominal_alt = uav_nominal_altitudes[d_idx]
                                 vz_des = np.clip(nominal_alt - current_alt, -1.0, 1.0)
 
@@ -1435,7 +1481,7 @@ if __name__ == "__main__":
                     t_elapsed = t - det_time
                     drift_center = det_pos + v_drift * t_elapsed
 
-                    vec = drift_center - drone_positions[d_idx][:2]
+                    vec = drift_center - current_positions[d_idx][:2]
                     dist = np.linalg.norm(vec)
 
                     if dist > 5.0:
@@ -1446,13 +1492,13 @@ if __name__ == "__main__":
                         vx_des = vy_des = 0.0
 
                     # 2) Descend gently
-                    current_alt = drone_positions[d_idx][2]
+                    current_alt = current_positions[d_idx][2]
                     descent_alt = 20.0
                     vz_des = -1.5 if current_alt > descent_alt else 0.0
 
                     # 3) Compute FOV belief stats
                     vis_mask_inside, _ = visible_cells_at(
-                        drone_positions[d_idx],
+                        current_positions[d_idx],
                         grid_points
                     )
 
@@ -1568,7 +1614,7 @@ if __name__ == "__main__":
             # --- Fallback: any other mode → regular IPP ---
             else:
                 vx_des, vy_des, vz_des, *_ = plan_velocity_ipp_3D(
-                    drone_positions[d_idx], belief, grid_points, soft_poly,
+                    current_positions[d_idx], belief, grid_points, soft_poly,
                     fov_angle=theta_FOV, v_max=v_max, n_directions=16, step_length=40.0,
                     I_scale=I_scale, E_scale=E_scale, alpha_d=alpha_d,
                     buffer=buffer, pred_depth=pred_depth
@@ -1594,13 +1640,13 @@ if __name__ == "__main__":
         # 7. Boundary correction
         # ------------------------------------------
         for d_idx in range(num_drones):
-            next_pos = drone_positions[d_idx] + drone_vels[d_idx] * dt_step
+            next_pos = current_positions[d_idx] + drone_vels[d_idx] * dt_step
             point_next = Point(next_pos[0], next_pos[1])
             if not safe_poly.contains(point_next):
                 nearest = np.array(safe_poly.exterior.interpolate(
                     safe_poly.exterior.project(point_next)
                 ).coords[0])
-                direction = nearest - drone_positions[d_idx][:2]
+                direction = nearest - current_positions[d_idx][:2]
                 norm = np.linalg.norm(direction)
                 if norm > 1e-3:
                     vx_corr, vy_corr = direction / norm * min(norm / dt_step, v_max)
@@ -1611,8 +1657,8 @@ if __name__ == "__main__":
         # ------------------------------------------
         # 8. Advance UAV positions
         # ------------------------------------------
-        for d_idx in range(num_drones):
-            drone_positions[d_idx] += drone_vels[d_idx] * dt_step
+        # for d_idx in range(num_drones):
+        #     drone_positions[d_idx] += drone_vels[d_idx] * dt_step
 
         # ============================
         # Energy consumption update
@@ -1663,7 +1709,7 @@ if __name__ == "__main__":
 
         # --- Update UAV and victim positions on the map ---
         for d_idx in range(num_drones):
-            drone_plots[d_idx].set_data(drone_positions[d_idx][0], drone_positions[d_idx][1])
+            drone_plots[d_idx].set_data(current_positions[d_idx][0], current_positions[d_idx][1])
         victim_plot.set_offsets(victims[:, :2])
         # --- Update detection point marker ---
         if detection_active and detection_pos is not None:
@@ -1711,12 +1757,26 @@ if __name__ == "__main__":
         fig.canvas.draw_idle()
         fig.canvas.flush_events()
 
-        # ============================
-        # Velocity plot update
-        # ============================
+        # ------------------------------------------
+        # SEND VELOCITIES TO IVY (Inserted Here)
+        # ------------------------------------------
         vel_time.append(t)
         for d_idx in range(num_drones):
             vx, vy, vz = drone_vels[d_idx]
+            
+            # --- NEW CODE START ---
+            try:
+                # Get the real AC_ID based on the loop index
+                ac_id = AC_MAP.get(d_idx)
+                
+                if ac_id is not None:
+                    # Send the command
+                    send_guided(interface, ac_id, vx, vy, vz)
+            except Exception as e:
+                print(f"Error sending Ivy message: {e}")
+            # --- NEW CODE END ---
+
+            # Update Plotting History (Existing Code)
             vel_history[d_idx] = np.vstack((vel_history[d_idx], [vx, vy, vz]))
 
             # Update lines (vx, vy, vz)

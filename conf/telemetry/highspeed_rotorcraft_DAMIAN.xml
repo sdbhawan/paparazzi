@@ -69,6 +69,7 @@
       <message name="WP_MOVED_ENU"             period="1.0"/>
       <message name="WP_LIST_ENU"              period="1.0"/>
       <message name="MOVE_WP"                  period="1.0"/>
+      <message name="GUIDED_FULL_NED"          period="1.0"/>
     </mode> 
 
     <mode name="sim" key_press="d">
@@ -393,6 +394,7 @@
       <message name="WP_MOVED_ENU"             period="1.0"/>
       <message name="WP_LIST_ENU"              period="1.0"/>
       <message name="MOVE_WP"                  period="1.0"/>
+      <message name="GUIDED_FULL_NED"          period="1.0"/>
     </mode>
   </process>
 

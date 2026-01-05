@@ -121,7 +121,7 @@ plt.scatter(
     grid_points[:,0],
     grid_points[:,1],
     c=belief,
-    cmap="YlOrRd",
+    cmap="RdYlBu_r",
     s=14,
     alpha=0.9,
     edgecolors="none",
