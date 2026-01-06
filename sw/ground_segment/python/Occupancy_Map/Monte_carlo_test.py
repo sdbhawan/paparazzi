@@ -655,16 +655,28 @@ def run_trial(num_drones, num_victims, seed):
     victims = all_possible_victims[:num_victims]
     initial_victim_pos = [list(v) for v in victims] 
 
-    # 4. Initialize Drones (Randomized Start)
+    # 4. Initialize Drones (Fixed Start)
     drone_positions = []
     uav_nominal_altitudes = []
     initial_drone_positions = [] 
+
+    # Define your fixed positions
+    master_positions = [
+        np.array([400.0, 0.0, 80.0]),
+        np.array([50.0, -300.0, 40.0]),
+        np.array([0.0, -200.0, 40.0]), 
+        np.array([300.0, -40.0, 40.0]),
+        np.array([80.0, -100.0, 80.0]),
+        np.array([10.0, -250.0, 40.0]),
+        np.array([0.0, 0.0, 80.0])
+    ]
     
     for i in range(num_drones):
-        r_x = np.random.uniform(-100.0, 400.0)
-        r_y = np.random.uniform(-300.0, 50.0)
-        r_z = np.random.choice([40.0, 60.0, 80.0])
-        pos = np.array([r_x, r_y, r_z])
+        # Use modulo so if num_drones > 7, it cycles back to the start
+        pos = master_positions[i % len(master_positions)]
+        
+        # Extract Z height for the altitude list
+        r_z = pos[2] 
         
         drone_positions.append(pos)
         initial_drone_positions.append(list(pos))
@@ -999,7 +1011,7 @@ def run_trial(num_drones, num_victims, seed):
     }
 
 if __name__ == "__main__":
-    SEEDS = 5
+    SEEDS = 10
     results = []
     configs = [(3, 1), (5, 1), (7, 1), (3, 2), (5, 2), (7, 2)]
     
@@ -1015,5 +1027,5 @@ if __name__ == "__main__":
                 print(f"Error in Seed {seed} Config {nd}D/{nv}V: {e}")
                 
     df = pd.DataFrame(results)
-    df.to_csv("mc_results_final2.csv", index=False)
+    df.to_csv("mc_results_final3.csv", index=False)
     print("Done. Results saved to mc_results_final.csv")

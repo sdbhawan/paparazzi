@@ -49,13 +49,12 @@ cell_size = float(grid_x[1] - grid_x[0])
 # -----------------------------
 
 dt_step = 1.0
-v_drift = np.array([-1.7, -1.0])
+v_drift = np.array([0.2, 0.0])
 theta_FOV = np.deg2rad(45)
 E_scale = 100.0
 E_scale_track = 40.0
 gamma_wind = 5.0
-v_wind = v_drift.copy()             # treat wind ≈ drift for Deff (7.46)
-v_wind =v_wind
+v_wind = np.array([0.0, 10.0])
 v_max = 20.0        # max velocity [m/s]
 
 confirm_pconf = 0.6
@@ -248,38 +247,85 @@ def get_vsqp_power(v):
     else:
         return 323.0   # Fixed-Wing Cruise Regime
     
-def energy_of_path(path):
-    # Standard travel speed for the planner is v_max (20 m/s)
-    # At 20 m/s, get_vsqp_power returns ~323W
-    cruise_speed = 20.0 
-    P_cruise_travel = get_vsqp_power(cruise_speed) 
+# def energy_of_path(path):
+#     # Standard travel speed for the planner is v_max (20 m/s)
+#     # At 20 m/s, get_vsqp_power returns ~323W
+#     cruise_speed = 20.0 
+#     P_cruise_travel = get_vsqp_power(cruise_speed) 
     
-    # Cost of climbing (fighting gravity) is roughly equal to Hover power
-    P_climb = get_vsqp_power(0.0) # 1751 W
-    v_climb = 2.0
-    v_desc = 3.0
+#     # Cost of climbing (fighting gravity) is roughly equal to Hover power
+#     P_climb = get_vsqp_power(0.0) # 1751 W
+#     v_climb = 2.0
+#     v_desc = 3.0
 
+#     total_energy = 0.0
+
+#     for i in range(len(path) - 1):
+#         p0, p1 = path[i], path[i+1]
+#         dist_xy = np.linalg.norm(p1[:2] - p0[:2])
+#         dz = p1[2] - p0[2]
+
+#         # Horizontal Energy: Power * Time
+#         if dist_xy > 1e-3:
+#             t_segment = dist_xy / cruise_speed
+#             E_horiz = P_cruise_travel * t_segment
+#         else:
+#             E_horiz = 0.0
+
+#         # Vertical Energy
+#         if dz > 0:   
+#             t_climb = dz / v_climb
+#             E_vert = P_climb * t_climb
+#         elif dz < 0: 
+#             t_desc = -dz / v_desc
+#             E_vert = P_climb * t_desc * 0.5 # Descent is cheaper (gravity assists)
+#         else:        
+#             E_vert = 0.0
+        
+#         total_energy += (E_horiz + E_vert)
+        
+#     return total_energy
+
+def energy_of_path(path):
+    # Use the global wind vector
+    global v_wind 
+    
     total_energy = 0.0
+    v_climb, v_desc = 2.0, 3.0
+    P_climb = get_vsqp_power(0.0) # 1751 W
 
     for i in range(len(path) - 1):
         p0, p1 = path[i], path[i+1]
-        dist_xy = np.linalg.norm(p1[:2] - p0[:2])
+        vec_g = (p1[:2] - p0[:2])
+        dist_xy = np.linalg.norm(vec_g)
         dz = p1[2] - p0[2]
 
-        # Horizontal Energy: Power * Time
         if dist_xy > 1e-3:
-            t_segment = dist_xy / cruise_speed
-            E_horiz = P_cruise_travel * t_segment
+            # Calculate the ground velocity vector for this segment
+            # Note: We use the wind-aware vg we just fixed in the planner
+            unit_vec = vec_g / (dist_xy + 1e-6)
+            v_headwind_comp = np.dot(v_wind[:2], unit_vec)
+            vg_allowed = max(2.0, min(20.0, 20.0 + v_headwind_comp))
+            
+            v_ground_vec = unit_vec * vg_allowed
+            
+            # Find the resulting airspeed vector
+            v_air_vec = v_ground_vec - v_wind[:2]
+            v_air_mag = np.linalg.norm(v_air_vec)
+            
+            # Get power based on AIRSPEED
+            P_segment = get_vsqp_power(v_air_mag)
+            
+            t_segment = dist_xy / vg_allowed
+            E_horiz = P_segment * t_segment
         else:
             E_horiz = 0.0
 
-        # Vertical Energy
+        # Vertical Energy (unchanged)
         if dz > 0:   
-            t_climb = dz / v_climb
-            E_vert = P_climb * t_climb
+            E_vert = P_climb * (dz / v_climb)
         elif dz < 0: 
-            t_desc = -dz / v_desc
-            E_vert = P_climb * t_desc * 0.5 # Descent is cheaper (gravity assists)
+            E_vert = P_climb * (-dz / v_desc) * 0.5
         else:        
             E_vert = 0.0
         
@@ -381,16 +427,42 @@ def plan_velocity_ipp_3D(drone_pos, drone_vel, belief, grid_points, soft_poly,
         return 0.0, 0.0, 0.0, [drone_pos, drone_pos], None, 0.0
 
     # 5. Output Velocity Calculation
+    # p0, p1 = best_path[0], best_path[1]
+    # vec = p1 - p0
+    # dist = np.linalg.norm(vec)
+    
+    # travel_time = max(dist / v_max, 0.1)
+    # vx = vec[0] / travel_time
+    # vy = vec[1] / travel_time
+    # vz = vec[2] / travel_time
+
+
+    # 5. Output Velocity Calculation (Wind-Aware Fix)
     p0, p1 = best_path[0], best_path[1]
     vec = p1 - p0
-    dist = np.linalg.norm(vec)
     
-    travel_time = max(dist / v_max, 0.1)
+    # --- FIX: Define dist and unit_vec ---
+    dist = np.linalg.norm(vec)
+    unit_vec = vec / (dist + 1e-6)
+
+    # Calculate max allowable ground speed (vg) to keep Airspeed <= 20m/s
+    # Headwind component is negative in the dot product
+    v_headwind_comp = np.dot(v_wind[:2], unit_vec[:2])
+    v_g_allowed = 20.0 + v_headwind_comp 
+
+    # Ground speed cannot exceed the platform limit (20m/s) or the wind-safe limit
+    v_g_final = max(2.0, min(20.0, v_g_allowed)) 
+
+    # Use the calculated ground speed to find travel time
+    travel_time = max(dist / v_g_final, 0.1)
+    
     vx = vec[0] / travel_time
     vy = vec[1] / travel_time
     vz = vec[2] / travel_time
 
     return float(vx), float(vy), float(vz), best_path, best_mask, best_J
+
+
 
 
 
@@ -767,6 +839,33 @@ for axv in axs_vel:
 # Initialize storage for velocity history
 vel_time = []
 vel_history = [np.empty((0, 3)) for _ in range(num_drones)]
+
+# ============================
+# Dedicated Airspeed Visualization Setup
+# ============================
+fig_air, axs_air = plt.subplots(3, 1, figsize=(8, 10), sharex=True)
+fig_air.suptitle("UAV Airspeed Magnitude ($v_a$) over Time")
+
+# Initialize lines and formatting
+air_lines = []
+air_history = [np.empty((0,)) for _ in range(num_drones)]
+
+for i in range(3):
+    # Reference lines for flight regimes
+    axs_air[i].axhline(y=17.0, color='r', linestyle='--', alpha=0.5, label="Cruise Threshold")
+    axs_air[i].axhline(y=20.0, color='k', linestyle='-', alpha=0.7, label="Airspeed Limit")
+    axs_air[i].set_ylabel(f"UAV{i} $v_a$ [m/s]")
+    axs_air[i].set_ylim(0, 25) # Fixed Y-range is often better for airspeed to see limits
+    axs_air[i].grid(True)
+
+axs_air[-1].set_xlabel("Time [s]")
+
+for d_idx in range(num_drones):
+    color = plt.cm.tab10(d_idx)
+    # Each drone gets its own subplot
+    line, = axs_air[d_idx % 3].plot([], [], color=color, lw=2, label=f"UAV{d_idx}")
+    air_lines.append(line)
+    axs_air[d_idx % 3].legend(loc="upper right")
 
 
 # -----------------------------
@@ -1575,19 +1674,53 @@ if __name__ == "__main__":
         # ------------------------------------------
         # 7. Boundary correction
         # ------------------------------------------
+        # for d_idx in range(num_drones):
+        #     next_pos = drone_positions[d_idx] + drone_vels[d_idx] * dt_step
+        #     point_next = Point(next_pos[0], next_pos[1])
+        #     if not safe_poly.contains(point_next):
+        #         nearest = np.array(safe_poly.exterior.interpolate(
+        #             safe_poly.exterior.project(point_next)
+        #         ).coords[0])
+        #         direction = nearest - drone_positions[d_idx][:2]
+        #         norm = np.linalg.norm(direction)
+        #         if norm > 1e-3:
+        #             vx_corr, vy_corr = direction / norm * min(norm / dt_step, v_max)
+        #         else:
+        #             vx_corr, vy_corr = 0.0, 0.0
+        #         drone_vels[d_idx][:2] = [vx_corr, vy_corr]
+
+        # ------------------------------------------
+        # 7. Boundary correction (Wind-Aware)
+        # ------------------------------------------
         for d_idx in range(num_drones):
             next_pos = drone_positions[d_idx] + drone_vels[d_idx] * dt_step
             point_next = Point(next_pos[0], next_pos[1])
+            
             if not safe_poly.contains(point_next):
                 nearest = np.array(safe_poly.exterior.interpolate(
                     safe_poly.exterior.project(point_next)
                 ).coords[0])
-                direction = nearest - drone_positions[d_idx][:2]
-                norm = np.linalg.norm(direction)
+                
+                direction_vec = nearest - drone_positions[d_idx][:2]
+                norm = np.linalg.norm(direction_vec)
+                
                 if norm > 1e-3:
-                    vx_corr, vy_corr = direction / norm * min(norm / dt_step, v_max)
+                    unit_dir = direction_vec / norm
+                    
+                    # --- FIX: Calculate max safe ground speed for this direction ---
+                    # Component of wind in the correction direction (negative = headwind)
+                    v_headwind_comp = np.dot(v_wind[:2], unit_dir)
+                    
+                    # Ensure Airspeed <= 20m/s
+                    v_g_allowed = 20.0 + v_headwind_comp 
+                    
+                    # Ground speed cannot exceed the lower of (physical limit) or (wind safety)
+                    speed_limit = max(2.0, min(20.0, v_g_allowed)) 
+                    
+                    vx_corr, vy_corr = unit_dir * min(norm / dt_step, speed_limit)
                 else:
                     vx_corr, vy_corr = 0.0, 0.0
+                    
                 drone_vels[d_idx][:2] = [vx_corr, vy_corr]
 
         # ------------------------------------------
@@ -1595,6 +1728,7 @@ if __name__ == "__main__":
         # ------------------------------------------
         for d_idx in range(num_drones):
             drone_positions[d_idx] += drone_vels[d_idx] * dt_step
+
 
 
         # ============================
@@ -1609,10 +1743,11 @@ if __name__ == "__main__":
         for d_idx in range(num_drones):
             # 1. Get Kinematics
             vx, vy, vz = drone_vels[d_idx]
-            v_horiz = np.linalg.norm([vx, vy])
+            v_air_vec = np.array([vx, vy]) - v_wind[:2]
+            v_air_magnitude = np.linalg.norm(v_air_vec)
 
-            # 2. Base Aerodynamic Power (Empirical Model)
-            P_inst = get_vsqp_power(v_horiz)
+            # Use airspeed to determine the flight mode and power draw
+            P_inst = get_vsqp_power(v_air_magnitude)
 
             # 3. Vertical Penalty (Climbing is expensive)
             # Simple physics: If climbing, add load. If descending, reduce slightly.
@@ -1700,39 +1835,59 @@ if __name__ == "__main__":
         fig.canvas.flush_events()
 
         # ============================
-        # Velocity plot update
+        # 1. Groundspeed Plot Update
         # ============================
         vel_time.append(t)
         for d_idx in range(num_drones):
             vx, vy, vz = drone_vels[d_idx]
             vel_history[d_idx] = np.vstack((vel_history[d_idx], [vx, vy, vz]))
 
-            # Update lines (vx, vy, vz)
             vel_lines[d_idx][0].set_data(np.arange(len(vel_history[d_idx])), vel_history[d_idx][:, 0])
             vel_lines[d_idx][1].set_data(np.arange(len(vel_history[d_idx])), vel_history[d_idx][:, 1])
             vel_lines[d_idx][2].set_data(np.arange(len(vel_history[d_idx])), vel_history[d_idx][:, 2])
 
-        # Adjust x-limits dynamically
+        # ============================
+        # 2. Airspeed Plot Update (FIXED)
+        # ============================
+        for d_idx in range(num_drones):
+            vx, vy, _ = drone_vels[d_idx]
+            
+            # Calculate Airspeed Magnitude: ||v_ground - v_wind||
+            v_air_vec = np.array([vx, vy]) - v_wind[:2]
+            v_air_mag = np.linalg.norm(v_air_vec)
+            
+            # Append to history and update line
+            air_history[d_idx] = np.append(air_history[d_idx], v_air_mag)
+            air_lines[d_idx].set_data(np.arange(len(air_history[d_idx])), air_history[d_idx])
+
+        # --- DYNAMICAL SCALING ---
+        # Update limits for both figures so they move with time
         for axv in axs_vel:
             axv.relim()
             axv.autoscale_view()
 
-        # --- Draw velocity figure updates ---
+        for axa in axs_air:
+            axa.relim()
+            axa.autoscale_view()
+
+        # --- DRAW AND FLUSH ---
         fig_vel.canvas.draw_idle()
         fig_vel.canvas.flush_events()
+        fig_air.canvas.draw_idle()
+        fig_air.canvas.flush_events()
 
         # ============================
-        # Energy plot update
+        # 3. Energy plot update
         # ============================
-
         for d_idx in range(num_drones):
             energy_lines[d_idx].set_data(np.arange(len(energy_history[d_idx])), energy_history[d_idx])
 
         ax_energy.relim()
         ax_energy.autoscale_view()
-
         fig_energy.canvas.draw_idle()
         fig_energy.canvas.flush_events()
+
+ 
 
 
         # --- Small delay for real-time smoothness ---
